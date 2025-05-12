@@ -2,6 +2,9 @@
 ### 访客人数：
 <img src="https://count.kjchmc.cn/get/@Byass-Web-Restrictions?theme=rule34" alt="如果您无法看到此内容，请刷新页面。">
 
+### 🔗 其他链接 
+- 脚本源码：[GitHub 仓库](https://github.com/521-baby/ChaoXing-SuperSrarLearn)    
+- 如果有帮助到你<img src='https://github.com/521-baby/Bypass-Web-Restrictions/blob/main/%E7%A0%B4%E9%99%A4%E7%BD%91%E9%A1%B5%E9%99%90%E5%88%B6.js' width='16px' /> 投喂渠道：[⚡爱发电](https://afdian.com/a/chunshu) or [微信赞赏](https://github.com/521-baby/521-baby/blob/main/DONATE.md) or [支付宝](https://github.com/521-baby/521-baby/blob/main/DONATE2.md)</del>
 ## 🛠️ 安装说明  
 ### 1. 安装浏览器扩展（二选一）  
 #### ▶ 油猴 (Tampermonkey)  
