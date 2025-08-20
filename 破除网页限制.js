@@ -16,7 +16,7 @@
 // @description:ja    サイトのほとんどを殺すために渡し、あなたは、コピー切り取り、テキスト、右クリックメニューを選択することは禁止の制限を解除することができます
 
 // @author            六斤八两
-// @version           1.0.0
+// @version           1.0.1
 // @license           LGPLv3
 
 
@@ -41,7 +41,7 @@
     default_rule: {
       name: "default",
       hook_eventNames: "contextmenu|select|selectstart|copy|cut|dragstart",
-      unhook_eventNames: "mousedown|mouseup|keydown|keyup",
+      unhook_eventNames: "keydown|keyup",
       dom0: true,
       hook_addEventListener: true,
       hook_preventDefault: true,
@@ -49,6 +49,32 @@
       add_css: true
     }
   };
+  // 站点模式与存储
+  var MODES = { standard: 'standard', light: 'light', friendly: 'friendly', disabled: 'disabled' };
+  var MODE_LABELS = { standard: '标准模式', light: '轻量模式', friendly: '友好模式', disabled: '禁用' };
+  var siteModes = GM_getValue('site_modes', {});
+  function getSiteMode(host) {
+    return siteModes[host] || '';
+  }
+  function setSiteMode(host, mode) {
+    siteModes[host] = mode;
+    GM_setValue('site_modes', siteModes);
+  }
+  // 预设友好模式的常见视频网站后缀
+  var FRIENDLY_SUFFIXES = [
+    'bilibili.com', 'iqiyi.com', 'youku.com', 'v.qq.com', 'video.qq.com',
+    'mgtv.com', 'acfun.cn', 'sohu.com', 'tv.sohu.com', 'pptv.com',
+    'le.com', 'tudou.com', 'youtube.com'
+  ];
+  function getDefaultModeForHost(host) {
+    for (var i = 0; i < FRIENDLY_SUFFIXES.length; i++) {
+      var suf = FRIENDLY_SUFFIXES[i];
+      if (host === suf || host.slice(-suf.length - 1) === '.' + suf || host.slice(-suf.length) === suf) {
+        return MODES.friendly;
+      }
+    }
+    return '';
+  }
   // 域名列表（增加用户排除列表存储）
   var lists = {
     // 用户自定义排除列表
@@ -59,6 +85,8 @@
       'mail.qq.com',
       'translate.google.com'
     ]),
+    // 保留给规则匹配的黑名单（正则表达式），默认为空
+    black_list: [],
     // 合并后的排除列表（仅用于显示）
     exclude_list: function() {
       return this.base_blacklist.concat(GM_getValue('exclude_list', []))
@@ -68,12 +96,16 @@
 
   // 要处理的 event 列表
   var hook_eventNames, unhook_eventNames, eventNames;
+  // 全局状态（供弹窗展示）
+  var g_currentMode = 'standard';
+  var g_rule = null;
   // 储存名称
   var storageName = getRandStr('qwertyuiopasdfghjklzxcvbnmQWERTYUIOPASDFGHJKLZXCVBNM', parseInt(Math.random() * 12 + 8));
   // 储存被 Hook 的函数
   var EventTarget_addEventListener = EventTarget.prototype.addEventListener;
   var document_addEventListener = document.addEventListener;
   var Event_preventDefault = Event.prototype.preventDefault;
+  var originalReturnValueDescriptor = Object.getOwnPropertyDescriptor(Event.prototype, 'returnValue');
 
   // Hook addEventListener proc
   function addEventListener(type, func, useCapture) {
@@ -110,6 +142,68 @@
           }
         }
       }
+    }
+  }
+  // 使用 MutationObserver 增量清理 DOM0 事件
+  function cleanseElement(root) {
+    if(!root) return;
+    var nodes = [root];
+    if(root.querySelectorAll) {
+      nodes = nodes.concat(Array.prototype.slice.call(root.querySelectorAll('*')));
+    }
+    for(var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      for(var j in eventNames) {
+        var evt = eventNames[j];
+        var name = 'on' + evt;
+        if(el[name] !== null && el[name] !== onxxx) {
+          if(unhook_eventNames.indexOf(evt) >= 0) {
+            el[storageName + name] = el[name];
+            el[name] = onxxx;
+          } else {
+            el[name] = null;
+          }
+        }
+      }
+    }
+  }
+
+  function setupDom0Cleaner() {
+    cleanseElement(document);
+    try {
+      var observer = new MutationObserver(function(mutations) {
+        for(var i = 0; i < mutations.length; i++) {
+          var m = mutations[i];
+          for(var k = 0; k < m.addedNodes.length; k++) {
+            var node = m.addedNodes[k];
+            if(node && node.nodeType === 1) {
+              cleanseElement(node);
+            }
+          }
+        }
+      });
+      observer.observe(document.documentElement, { childList: true, subtree: true });
+      window.addEventListener('load', function() { cleanseElement(document); }, true);
+    } catch(e) {
+      // 降级到原循环
+      setInterval(clearLoop, 30 * 1000);
+      setTimeout(clearLoop, 2500);
+      window.addEventListener('load', clearLoop, true);
+      clearLoop();
+    }
+  }
+
+  // 轻量模式：仅在捕获阶段阻断常见拦截事件的传播
+  function enableLightModeCapture() {
+    var captureTypes = ['contextmenu', 'copy', 'cut', 'selectstart', 'dragstart'];
+    function stopAll(e) {
+      e.stopImmediatePropagation();
+      e.stopPropagation();
+    }
+    for(var i = 0; i < captureTypes.length; i++) {
+      var t = captureTypes[i];
+      window.addEventListener(t, stopAll, true);
+      document.addEventListener(t, stopAll, true);
     }
   }
 
@@ -189,6 +283,12 @@
   function init() {
     // 注册菜单项
     const isExcluded = lists.exclude_list().includes(location.host);
+    // 计算当前模式（即使被排除也计算，用于菜单显示）
+    var host = location.hostname;
+    var defaultMode = getDefaultModeForHost(host) || MODES.light;
+    var currentModeForMenu = isExcluded ? MODES.disabled : (getSiteMode(host) || defaultMode);
+    g_currentMode = currentModeForMenu;
+    g_rule = rules.default_rule;
 
     GM_registerMenuCommand(`当前网站：${isExcluded ? '❌' : '✔️'}`, () => {
       const currentList = lists.exclude_list();
@@ -204,24 +304,48 @@
       createPopup();
     });
 
+    // 菜单：显示/切换模式（打开面板），始终注册，并使用中文标签
+    GM_registerMenuCommand(`站点模式：${MODE_LABELS[currentModeForMenu] || currentModeForMenu}`, () => { createPopup(); });
+
     // 如果当前网站在排除列表中则不执行后续逻辑
-    if (isExcluded) return;
+    if (isExcluded) { g_currentMode = MODES.disabled; g_rule = rules.default_rule; return; }
     // 获取当前域名的规则
     var url = window.location.host + window.location.pathname;
     var rule = getRule(url);
+    // host/defaultMode 已在上面计算
+    var currentMode = getSiteMode(host) || defaultMode;
+    g_currentMode = currentMode;
+    g_rule = rule;
+
+    // 按模式调整策略
+    if (currentMode === MODES.disabled) {
+      return; // 完全不影响页面
+    } else if (currentMode === MODES.friendly) {
+      rule.unhook_eventNames = "";
+      rule.hook_addEventListener = false;
+      rule.hook_preventDefault = false;
+      rule.hook_set_returnValue = false;
+      rule.dom0 = false;
+      rule.hook_eventNames = "";
+      // 仅保留 CSS 放行
+    } else if (currentMode === MODES.light) {
+      rule.unhook_eventNames = "";
+      rule.hook_addEventListener = false;
+      rule.hook_preventDefault = false;
+      rule.hook_set_returnValue = false;
+      rule.dom0 = false;
+      enableLightModeCapture();
+    }
 
     // 设置 event 列表
-    hook_eventNames = rule.hook_eventNames.split("|");
+    hook_eventNames = rule.hook_eventNames.split("|").filter(Boolean);
     // TODO Allowed to return value
-    unhook_eventNames = rule.unhook_eventNames.split("|");
+    unhook_eventNames = rule.unhook_eventNames.split("|").filter(Boolean);
     eventNames = hook_eventNames.concat(unhook_eventNames);
 
     // 调用清理 DOM0 event 方法的循环
     if(rule.dom0) {
-      setInterval(clearLoop, 30 * 1000);
-      setTimeout(clearLoop, 2500);
-      window.addEventListener('load', clearLoop, true);
-      clearLoop();
+      setupDom0Cleaner();
     }
 
     // hook addEventListener
@@ -241,11 +365,33 @@
 
     // Hook set returnValue
     if(rule.hook_set_returnValue) {
-      Event.prototype.__defineSetter__('returnValue', function() {
-        if(this.returnValue !== true && eventNames.indexOf(this.type) >= 0) {
-          this.returnValue = true;
-        }
-      });
+      try {
+        Object.defineProperty(Event.prototype, 'returnValue', {
+          configurable: true,
+          enumerable: false,
+          set: function(v) {
+            if(eventNames.indexOf(this.type) >= 0 && v !== true) {
+              return; // 忽略将其设为 false 的尝试
+            }
+            if(originalReturnValueDescriptor && originalReturnValueDescriptor.set) {
+              originalReturnValueDescriptor.set.call(this, v);
+            }
+          },
+          get: function() {
+            if(originalReturnValueDescriptor && originalReturnValueDescriptor.get) {
+              return originalReturnValueDescriptor.get.call(this);
+            }
+            return true;
+          }
+        });
+      } catch(e) {
+        // 退回旧方案
+        Event.prototype.__defineSetter__('returnValue', function() {
+          if(this.returnValue !== true && eventNames.indexOf(this.type) >= 0) {
+            this.returnValue = true;
+          }
+        });
+      }
     }
 
     console.debug('url: ' + url, 'storageName：' + storageName, 'rule: ' + rule.name);
@@ -354,6 +500,51 @@
     // 创建容器并添加控制按钮
     const container = document.createElement('div');
     container.id = 'rml-popup';
+    const modeLabelMap = { standard: '标准模式', light: '轻量模式', friendly: '友好模式', disabled: '禁用' };
+    const modeLabel = modeLabelMap[g_currentMode] || g_currentMode || '标准模式';
+    const captureList = ['contextmenu','copy','cut','selectstart','dragstart'];
+    const EVENT_LABELS = {
+      contextmenu: '右键菜单',
+      copy: '复制',
+      cut: '剪切',
+      select: '文本选择',
+      selectstart: '选择开始',
+      dragstart: '拖拽开始',
+      keydown: '按键按下',
+      keyup: '按键抬起',
+      mousedown: '鼠标按下',
+      mouseup: '鼠标抬起'
+    };
+    function labelEvent(name){ return EVENT_LABELS[name] || name; }
+    function mapEvents(list){ return (list && list.length) ? list.map(labelEvent).join('，') : '无'; }
+    let processedEventsText = '';
+    if (g_currentMode === MODES.light) {
+      processedEventsText = mapEvents(captureList);
+    } else if (g_currentMode === MODES.friendly) {
+      processedEventsText = '无（仅 CSS 放行）';
+    } else if (g_currentMode === MODES.disabled) {
+      processedEventsText = '无（已禁用）';
+    } else {
+      processedEventsText = mapEvents(eventNames || []);
+    }
+    let featureList = [];
+    if (g_currentMode === MODES.disabled) {
+      featureList = ['已禁用'];
+    } else if (g_currentMode === MODES.friendly) {
+      if (g_rule && g_rule.add_css) featureList.push('CSS 放行选择');
+      featureList.push('最小侵入（不 Hook 事件）');
+    } else if (g_currentMode === MODES.light) {
+      if (g_rule && g_rule.add_css) featureList.push('CSS 放行选择');
+      featureList.push('捕获期阻断常见拦截事件');
+    } else {
+      // 标准模式
+      if (g_rule && g_rule.add_css) featureList.push('CSS 放行选择');
+      if (g_rule && g_rule.hook_addEventListener) featureList.push('Hook addEventListener');
+      if (g_rule && g_rule.hook_preventDefault) featureList.push('过滤 preventDefault');
+      if (g_rule && g_rule.hook_set_returnValue) featureList.push('保护 returnValue');
+      if (g_rule && g_rule.dom0) featureList.push('清理内联 on* 事件');
+    }
+    const featuresText = featureList.join('、');
     container.innerHTML = `
       <div class="window-controls">
         <button class="control-btn min-btn">−</button>
@@ -364,9 +555,16 @@
         <!-- 左侧状态面板 -->
         <div style="flex: 1; padding-right: 10px;">
           <div style="font-weight: bold; margin-bottom: 15px; color: #fff;">当前状态</div>
+          <div style="margin-bottom: 12px;">
+            <div>📌 当前模式：<span style="color:#7bd88f;">${modeLabel}</span></div>
+          </div>
           <div style="margin-bottom: 15px;">
             <div>✅ 已处理事件：</div>
-            <div style="color: #ccc; font-size: 12px;">${eventNames.join(', ')}</div>
+            <div style="color: #ccc; font-size: 12px;">${processedEventsText}</div>
+          </div>
+          <div style="margin-bottom: 15px;">
+            <div>🧩 实现的功能：</div>
+            <div style="color: #ccc; font-size: 12px;">${featuresText}</div>
           </div>
           <!-- 文字提示 -->
           <div>
@@ -381,6 +579,19 @@
 
         <!-- 右侧设置面板 -->
         <div style="flex: 1; border-left: 1px solid #444; padding-left: 20px;">
+          <div style="font-weight: bold; margin-bottom: 15px; color: #fff;">站点设置</div>
+          <div style="margin-bottom: 14px; font-size: 12px;">
+            <div style="margin: 10px 0">当前域名模式：</div>
+            <div style="display:flex; gap:8px; align-items:center;">
+              <select id="siteModeSelect" style="flex:1; padding:6px; background:#3d3d3d; color:#fff; border:1px solid #555; border-radius:4px;">
+                <option value="standard">标准模式</option>
+                <option value="light">轻量模式</option>
+                <option value="friendly">友好模式</option>
+                <option value="disabled">禁用</option>
+              </select>
+              <button id="saveModeBtn" style="padding: 6px 12px; background:#28c940; border:none; border-radius:4px; color:#fff; cursor:pointer;">保存模式</button>
+            </div>
+          </div>
           <div style="font-weight: bold; margin-bottom: 15px; color: #fff;">排除设置</div>
           <div style="margin-bottom: 10px; font-size: 12px;">
             <div style="margin: 10px 0">已排除域名（每行一个）:</div>
@@ -412,6 +623,29 @@
     `;
      // 添加容器到文档中
     document.body.appendChild(container);
+
+    // 初始化站点模式下拉框
+    (function initModeSelect(){
+      var modeSelect = container.querySelector('#siteModeSelect');
+      if(modeSelect) {
+        try {
+          var host = location.host;
+          var currentMode = getSiteMode(host) || getDefaultModeForHost(host) || MODES.light;
+          modeSelect.value = currentMode;
+        } catch(e) {}
+      }
+    })();
+
+    // 保存站点模式
+    var saveModeBtn = container.querySelector('#saveModeBtn');
+    if (saveModeBtn) {
+      saveModeBtn.addEventListener('click', function() {
+        var modeSelect = container.querySelector('#siteModeSelect');
+        var val = modeSelect ? modeSelect.value : 'standard';
+        setSiteMode(location.host, val);
+        window.location.reload();
+      });
+    }
 
     // 添加保存事件监听
     document.getElementById('saveExcludeList').addEventListener('click', () => {
